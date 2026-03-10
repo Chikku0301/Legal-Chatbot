@@ -113,6 +113,76 @@
         "breach_details": "Hukam",
         "claim_amount": "9000"
       }
+    },
+    {
+      "case_id": "SC-1006",
+      "phone": "telegram_user",
+      "user_name": "Sandeep Naidu",
+      "case_type": "General Civil Dispute",
+      "court": "Civil Court",
+      "filing_date": "2026-03-10",
+      "next_deadline": "2026-04-09",
+      "deadline_label": "Evidence Submission",
+      "hearing_date": "2026-04-24",
+      "status": "Filed",
+      "case_data": {
+        "user_name": "Sandeep Naidu",
+        "phone": "telegram_user",
+        "court": "Civil Court",
+        "city": "Chennai",
+        "opponent_name": "Sravan Karapakula",
+        "opponent_address": "Chinnakammapali",
+        "dispute_details": "Need to file case against person who scolded me with unparliamentary words",
+        "amount_involved": "0"
+      }
+    },
+    {
+      "case_id": "SC-1007",
+      "phone": "telegram_user",
+      "user_name": "Sandeep",
+      "case_type": "Rental Deposit / Rent Recovery",
+      "court": "Small Causes Court",
+      "filing_date": "2026-03-10",
+      "next_deadline": "2026-04-09",
+      "deadline_label": "Evidence Submission",
+      "hearing_date": "2026-04-24",
+      "status": "Filed",
+      "case_data": {
+        "user_name": "Sandeep",
+        "phone": "telegram_user",
+        "court": "Small Causes Court",
+        "city": "Chennai",
+        "landlord_name": "Jgkh",
+        "landlord_address": "Khkh",
+        "property_address": "Chinnakammapalli",
+        "deposit_amount": "0",
+        "vacated_date": "14 Apr 2025",
+        "rental_start": "15 Feb 2026"
+      }
+    },
+    {
+      "case_id": "SC-1008",
+      "phone": "telegram_user",
+      "user_name": "Sandeep",
+      "case_type": "Rental Deposit / Rent Recovery",
+      "court": "Small Causes Court",
+      "filing_date": "2026-03-10",
+      "next_deadline": "2026-04-09",
+      "deadline_label": "Evidence Submission",
+      "hearing_date": "2026-04-24",
+      "status": "Filed",
+      "case_data": {
+        "user_name": "Sandeep",
+        "phone": "telegram_user",
+        "court": "Small Causes Court",
+        "city": "Chennai",
+        "landlord_name": "Jgkh",
+        "landlord_address": "Khkh",
+        "property_address": "Chinnakammapalli",
+        "deposit_amount": "0",
+        "vacated_date": "14 Apr 2025",
+        "rental_start": "15 Feb 2026"
+      }
     }
   ]
 }

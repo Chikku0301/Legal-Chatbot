@@ -9,16 +9,16 @@ import os
 import sys
 import logging
 import datetime
+import asyncio
 
 from dotenv import load_dotenv
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application,
+    ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
-    ConversationHandler,
     filters,
     ContextTypes,
 )
@@ -31,6 +31,8 @@ if PROJECT_DIR not in sys.path:
 from core.classifier import classify_dispute, get_workflow
 from core.document_generator import generate_text_document, txt_to_pdf
 from core.tracker import OUTPUT_DIR, create_case, check_reminders, get_case_tracker_text
+from core.session import get_user_session, update_user_session, clear_user_session, State
+from core.llm_helper import get_field_help
 
 # ─── Load env ─────────────────────────────────────────────────────────────────
 load_dotenv(os.path.join(PROJECT_DIR, ".env"))
@@ -46,27 +48,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─── Conversation States ─────────────────────────────────────────────────────
-(
-    ASK_NAME,
-    ASK_PROBLEM,
-    SHOW_WORKFLOW,
-    ASK_DOCS,
-    COLLECT_INFO,
-    GENERATE_DOC,
-    ASK_TRACKER,
-    DONE,
-) = range(8)
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  COMMAND HANDLERS
 # ═════════════════════════════════════════════════════════════════════════════
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Entry point — /start command."""
-    # Reset user data for a fresh session
-    context.user_data.clear()
+    user_id = update.effective_user.id
+    
+    # Reset user session for a fresh start
+    clear_user_session(user_id)
+    update_user_session(user_id, new_state=State.START)
 
     await update.message.reply_text(
         "⚖️ *LEGAL AID BOT*\n"
@@ -91,23 +84,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "👤 *Please tell me your name to begin.*",
         parse_mode="Markdown",
     )
-    return ASK_NAME
 
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel the conversation."""
-    context.user_data.clear()
+    user_id = update.effective_user.id
+    clear_user_session(user_id)
     await update.message.reply_text(
         "❌ Session cancelled.\n\n"
         "Send /start anytime to begin a new session.\n"
         "Good luck! ⚖️"
     )
-    return ConversationHandler.END
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show reminders for pending cases — /status command."""
-    reminders = check_reminders()
+    reminders = await asyncio.to_thread(check_reminders)
     if not reminders:
         await update.message.reply_text("✅ No pending reminders at this time.")
         return
@@ -123,36 +115,89 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  CONVERSATION FLOW
+#  CONCURRENT ROUTER
 # ═════════════════════════════════════════════════════════════════════════════
 
-async def ask_name_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Routes incoming text messages to their specific handlers asynchronously."""
+    asyncio.create_task(_process_user_message(update, context))
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Routes incoming inline button callbacks asynchronously."""
+    asyncio.create_task(_process_user_callback(update, context))
+
+
+async def _process_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process normal text messages based on persistent DB state."""
+    user_id = update.effective_user.id
+    message = update.message.text.strip()
+    
+    session = get_user_session(user_id)
+    state = session.get("state")
+
+    if state == State.START:
+        await ask_name_received(update, message, user_id, session)
+    elif state == State.ASK_PROBLEM:
+        await ask_problem_received(update, message, user_id, session)
+    elif state == State.COLLECT_INFO:
+        await collect_info_received(update, message, user_id, session)
+    elif state == State.DONE:
+        # Prompt them to /start to use the bot again
+        await update.message.reply_text("Your session is complete. Please type /start to begin a new one.")
+    else:
+        # Catch unexpected state
+        await update.message.reply_text("I didn't expect a message right now. If you're stuck, type /start.")
+
+
+async def _process_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process inline keyboard responses based on DB state."""
+    user_id = update.effective_user.id
+    query = update.callback_query
+    await query.answer()
+    
+    session = get_user_session(user_id)
+    state = session.get("state")
+    data = query.data
+    
+    if state == State.ASK_DOCS and data.startswith("docs_"):
+        await docs_callback(update, query, user_id, session)
+    elif state == State.ASK_TRACKER and data.startswith("track_"):
+        await tracker_callback(update, query, user_id, session)
+    else:
+        await query.edit_message_text("❌ This button has expired or is invalid for your current step.")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  WORKFLOW HANDLERS
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def ask_name_received(update: Update, message: str, user_id: int, session: dict):
     """User sent their name → ask for problem description."""
-    name = update.message.text.strip()
-    context.user_data["user_name"] = name
+    update_user_session(user_id, new_state=State.ASK_PROBLEM, updates={"user_name": message})
 
     await update.message.reply_text(
-        f"Hello *{name}*! 👋\n\n"
+        f"Hello *{message}*! 👋\n\n"
         "📝 *Please describe your legal problem in your own words.*\n\n"
         "For example: My landlord is not returning my security deposit of Rs.50,000",
         parse_mode="Markdown",
     )
-    return ASK_PROBLEM
 
 
-async def ask_problem_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def ask_problem_received(update: Update, message: str, user_id: int, session: dict):
     """User described the problem → classify and show workflow."""
-    message = update.message.text.strip()
-    context.user_data["user_message"] = message
+    
+    # Offload blocking ML classification to background thread
+    category, process, court = await asyncio.to_thread(classify_dispute, message)
+    workflow = await asyncio.to_thread(get_workflow, category)
 
-    # Classify
-    category, process, court = classify_dispute(message)
-    workflow = get_workflow(category)
-
-    context.user_data["category"] = category
-    context.user_data["process"] = process
-    context.user_data["court"] = court
-    context.user_data["workflow"] = workflow
+    session_updates = {
+        "user_message": message,
+        "category": category,
+        "process": process,
+        "court": court,
+        "workflow": workflow
+    }
+    update_user_session(user_id, new_state=State.ASK_DOCS, updates=session_updates)
 
     # Build step list
     steps_text = "\n".join(
@@ -191,16 +236,13 @@ async def ask_problem_received(update: Update, context: ContextTypes.DEFAULT_TYP
         parse_mode="Markdown",
         reply_markup=keyboard,
     )
-    return ASK_DOCS
 
 
-async def docs_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def docs_callback(update: Update, query, user_id: int, session: dict):
     """Handle documents readiness inline button."""
-    query = update.callback_query
-    await query.answer()
-
+    workflow = session["data"]["workflow"]
+    
     if query.data == "docs_no":
-        workflow = context.user_data["workflow"]
         docs_warning = "\n".join(f"  ⚠ {d}" for d in workflow["documents_needed"])
         await query.edit_message_text(
             "⚠️ *DOCUMENT WARNING*\n\n"
@@ -214,16 +256,20 @@ async def docs_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await query.edit_message_text("✅ Great! You have the required documents.")
 
     # Start collecting case info
-    workflow = context.user_data["workflow"]
     questions = workflow["questions"]
-    context.user_data["questions"] = questions
-    context.user_data["q_index"] = 0
-    context.user_data["case_data"] = {
-        "user_name": context.user_data["user_name"],
-        "phone": "telegram_user",
-        "court": context.user_data["court"],
-        "city": "Chennai",
+    
+    session_data_updates = {
+        "questions": questions,
+        "q_index": 0,
+        "case_data": {
+            "user_name": session["data"]["user_name"],
+            "phone": "telegram_user",
+            "court": session["data"]["court"],
+            "city": "Chennai",
+        }
     }
+    
+    update_user_session(user_id, new_state=State.COLLECT_INFO, updates=session_data_updates)
 
     # Ask the first question
     _, label = questions[0]
@@ -231,49 +277,79 @@ async def docs_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         "📝 *CASE DETAILS COLLECTION*\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "_Please answer the following questions.\n"
-        "Send 'skip' to skip an optional field._\n\n"
+        "Send 'skip' to skip an optional field.\n"
+        "Send '?' or 'help' if you're not sure what to enter._\n\n"
         f"❓ *Question 1/{len(questions)}:*\n"
         f"{label}",
         parse_mode="Markdown",
     )
-    return COLLECT_INFO
 
 
-async def collect_info_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Collect answers to workflow-specific questions one by one."""
-    answer = update.message.text.strip()
-    questions = context.user_data["questions"]
-    q_index = context.user_data["q_index"]
+async def collect_info_received(update: Update, message: str, user_id: int, session: dict):
+    """Collect answers to workflow-specific questions one by one. Or invoke LLM helper."""
+    answer = message
+    questions = session["data"]["questions"]
+    q_index = session["data"]["q_index"]
+    case_data = session["data"]["case_data"]
+    
+    field_key, field_label = questions[q_index]
 
-    # Save answer (unless skipped)
+    # Check for help triggers
+    if answer.lower() in ["?", "help", "what is this", "explain"]:
+        # Show typing indicator while LLM generates
+        await update.message.reply_chat_action(action="typing")
+        
+        # Offload Groq network call to background thread
+        help_text = await asyncio.to_thread(
+            get_field_help,
+            session["data"]["category"],
+            session["data"]["workflow"]["title"],
+            field_key,
+            field_label,
+            case_data,  # Has all previously collected answers
+            questions
+        )
+        
+        await update.message.reply_text(
+            f"💡 *Field Info:*\n{help_text}\n\n"
+            f"Now, please answer:\n❓ *Question {q_index + 1}/{len(questions)}:*\n{field_label}",
+            parse_mode="Markdown"
+        )
+        # We don't advance the state or q_index, wait for their actual answer
+        return
+
+    # Normal answer handling (Save answer unless skipped)
     if answer.lower() != "skip":
-        field_key, _ = questions[q_index]
-        context.user_data["case_data"][field_key] = answer
+        case_data[field_key] = answer
 
     # Move to next question
     q_index += 1
-    context.user_data["q_index"] = q_index
+    
+    update_user_session(user_id, updates={"q_index": q_index, "case_data": case_data})
 
     if q_index < len(questions):
-        _, label = questions[q_index]
+        _, next_label = questions[q_index]
         await update.message.reply_text(
             f"❓ *Question {q_index + 1}/{len(questions)}:*\n"
-            f"{label}",
+            f"{next_label}",
             parse_mode="Markdown",
         )
-        return COLLECT_INFO
+        return
 
     # All questions answered → generate document
-    return await generate_document(update, context)
+    update_user_session(user_id, new_state=State.ASK_TRACKER) # We wait here until doc completes
+    await generate_document(update, user_id, session)
 
 
-async def generate_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Generate the petition and send it as a file."""
+async def generate_document(update: Update, user_id: int, session: dict):
+    """Generate the petition and send it as a file (offloaded to thread)."""
     await update.message.reply_text("⚙️ _Generating your legal petition document…_", parse_mode="Markdown")
 
-    case_data = context.user_data["case_data"]
-    workflow = context.user_data["workflow"]
-    court = context.user_data["court"]
+    # Fetch fresh session state to ensure case_data has the absolute latest
+    session = get_user_session(user_id)
+    case_data = session["data"]["case_data"]
+    workflow = session["data"]["workflow"]
+    court = session["data"]["court"]
 
     safe_name = case_data["user_name"].replace(" ", "_")
     txt_filename = f"Legal_Petition_{safe_name}.txt"
@@ -281,13 +357,13 @@ async def generate_document(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     txt_path = os.path.join(OUTPUT_DIR, txt_filename)
     pdf_path = os.path.join(OUTPUT_DIR, pdf_filename)
 
-    # Generate text document
-    success_gen = generate_text_document(case_data, workflow, txt_path)
+    # Generate text document (Blocking CPU operation — offload to thread)
+    success_gen = await asyncio.to_thread(generate_text_document, case_data, workflow, txt_path)
 
-    # Convert to PDF
+    # Convert to PDF (Blocking CPU operation — offload to thread)
     pdf_gen = False
     if success_gen:
-        pdf_gen = txt_to_pdf(txt_path, pdf_path)
+        pdf_gen = await asyncio.to_thread(txt_to_pdf, txt_path, pdf_path)
 
     # Send the file(s)
     if success_gen:
@@ -315,7 +391,8 @@ async def generate_document(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
     else:
         await update.message.reply_text("⚠️ Document generation failed. Please try again with /start.")
-        return ConversationHandler.END
+        update_user_session(user_id, new_state=State.DONE)
+        return
 
     # Procedural guidance
     docs_text = "\n".join(f"     • {d}" for d in workflow["documents_needed"])
@@ -350,29 +427,26 @@ async def generate_document(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         parse_mode="Markdown",
         reply_markup=keyboard,
     )
-    return ASK_TRACKER
+    # State is already ASK_TRACKER from earlier
 
 
-async def tracker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def tracker_callback(update: Update, query, user_id: int, session: dict):
     """Handle case tracker inline button."""
-    query = update.callback_query
-    await query.answer()
-
-    case_data = context.user_data["case_data"]
-    workflow = context.user_data["workflow"]
-    court = context.user_data["court"]
-    category = context.user_data["category"]
-    process = context.user_data["process"]
-    user_name = context.user_data["user_name"]
+    case_data = session["data"]["case_data"]
+    workflow = session["data"]["workflow"]
+    court = session["data"]["court"]
+    category = session["data"]["category"]
+    process = session["data"]["process"]
+    user_name = session["data"]["user_name"]
 
     case_id = None
 
     if query.data == "track_yes":
-        case_id = create_case(case_data, workflow, court)
-        context.user_data["case_id"] = case_id
+        # DB operation — offload
+        case_id = await asyncio.to_thread(create_case, case_data, workflow, court)
 
         # Show case tracker
-        tracker_text = get_case_tracker_text(case_id)
+        tracker_text = await asyncio.to_thread(get_case_tracker_text, case_id)
         await query.edit_message_text(f"✅ Case created!\n\n{tracker_text}")
 
         # Reminders
@@ -454,8 +528,9 @@ async def tracker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
     await query.message.reply_text(summary, parse_mode="Markdown")
-    context.user_data.clear()
-    return ConversationHandler.END
+    
+    # Update state to Done and wipe form data
+    update_user_session(user_id, new_state=State.DONE, updates={})
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -475,46 +550,28 @@ def main():
     )
 
     app = (
-        Application.builder()
+        ApplicationBuilder()
         .token(TOKEN)
         .request(request)
         .build()
     )
 
-    # Conversation handler for the full legal aid flow
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            ASK_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, ask_name_received),
-            ],
-            ASK_PROBLEM: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, ask_problem_received),
-            ],
-            ASK_DOCS: [
-                CallbackQueryHandler(docs_callback, pattern="^docs_"),
-            ],
-            COLLECT_INFO: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, collect_info_received),
-            ],
-            ASK_TRACKER: [
-                CallbackQueryHandler(tracker_callback, pattern="^track_"),
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
-    app.add_handler(conv_handler)
+    # Add Command Handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("status", status_command))
 
+    # Add Generalized Async Routers for messages and callbacks
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+
     # Start polling
-    print("Legal Aid Bot is running on Telegram!")
+    print("⚖️ Legal Aid Bot running (Multi-User Async Server)!")
     print("   Press Ctrl+C to stop.\n")
     app.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
     )
-
 
 if __name__ == "__main__":
     main()

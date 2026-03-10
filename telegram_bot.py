@@ -30,7 +30,8 @@ if PROJECT_DIR not in sys.path:
 
 from core.classifier import classify_dispute, get_workflow
 from core.document_generator import generate_text_document, txt_to_pdf
-from core.tracker import OUTPUT_DIR, create_case, check_reminders, get_case_tracker_text
+from core.tracker import create_case, check_reminders, get_case_tracker_text
+from core.database import OUTPUT_DIR
 from core.session import get_user_session, update_user_session, clear_user_session, State
 from core.llm_helper import get_field_help
 
@@ -113,6 +114,50 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/help command — works at any point."""
+    user_id = update.effective_user.id
+    session = get_user_session(user_id)
+    state = session.get("state")
+
+    if not state or state == State.DONE:
+        await update.message.reply_text(
+            "I'm your Legal Aid Assistant!\n\n"
+            "Send /start to begin a new case session.\n"
+            "During a session, use /help anytime to ask questions.\n"
+            "Use /status to check your case reminders."
+        )
+        return
+
+    # Store the state we came from so we can return
+    update_user_session(user_id, new_state=State.WAITING_HELP, updates={"help_return_state": state})
+
+    field_label = ""
+    if state == State.COLLECT_INFO and "questions" in session["data"]:
+        q_index = session["data"].get("q_index", 0)
+        questions = session["data"]["questions"]
+        if q_index < len(questions):
+            _, field_label = questions[q_index]
+
+    if field_label:
+        await update.message.reply_text(
+            f"You are currently filling: {field_label}\n\n"
+            "Ask me anything! For example:\n"
+            "- What should I write in this field?\n"
+            "- What documents do I need?\n"
+            "- How does the court process work?\n"
+            "- Any doubt about your case...\n\n"
+            "Type your question below (or 'back' to return):"
+        )
+    else:
+        await update.message.reply_text(
+            "I'm here to help! Ask me anything:\n"
+            "- How does the legal process work?\n"
+            "- What documents do I need?\n"
+            "- What should I fill in a field?\n"
+            "- Any other doubt about your case...\n\n"
+            "Type your question below (or 'back' to return):"
+        )
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  CONCURRENT ROUTER
@@ -135,12 +180,36 @@ async def _process_user_message(update: Update, context: ContextTypes.DEFAULT_TY
     session = get_user_session(user_id)
     state = session.get("state")
 
+    # Check for help triggers in any state
+    if message.lower() in ("?", "help") and state and state not in (State.WAITING_HELP, State.DONE):
+        update_user_session(user_id, new_state=State.WAITING_HELP, updates={"help_return_state": state})
+
+        field_label = ""
+        if state == State.COLLECT_INFO and "questions" in session["data"]:
+            q_index = session["data"].get("q_index", 0)
+            questions = session["data"]["questions"]
+            if q_index < len(questions):
+                _, field_label = questions[q_index]
+
+        prompt = "I'm here to help! Ask me anything:\n\nType your question below (or 'back' to return):"
+        if field_label:
+            prompt = f"You are on: {field_label}\n\nAsk your question below (or 'back' to return):"
+
+        await update.message.reply_text(prompt)
+        return
+
     if state == State.START:
         await ask_name_received(update, message, user_id, session)
     elif state == State.ASK_PROBLEM:
         await ask_problem_received(update, message, user_id, session)
     elif state == State.COLLECT_INFO:
         await collect_info_received(update, message, user_id, session)
+    elif state == State.ASK_DEADLINE:
+        await ask_deadline_received(update, message, user_id, session)
+    elif state == State.ASK_HEARING:
+        await ask_hearing_received(update, message, user_id, session)
+    elif state == State.WAITING_HELP:
+        await help_query_received(update, message, user_id, session)
     elif state == State.DONE:
         # Prompt them to /start to use the bot again
         await update.message.reply_text("Your session is complete. Please type /start to begin a new one.")
@@ -264,6 +333,7 @@ async def docs_callback(update: Update, query, user_id: int, session: dict):
         "case_data": {
             "user_name": session["data"]["user_name"],
             "phone": "telegram_user",
+            "telegram_id": str(user_id),
             "court": session["data"]["court"],
             "city": "Chennai",
         }
@@ -371,13 +441,7 @@ async def generate_document(update: Update, user_id: int, session: dict):
             await update.message.reply_document(
                 document=open(pdf_path, "rb"),
                 filename=pdf_filename,
-                caption="📄 Your Legal Petition (PDF)",
-            )
-        if os.path.exists(txt_path):
-            await update.message.reply_document(
-                document=open(txt_path, "rb"),
-                filename=txt_filename,
-                caption="📄 Your Legal Petition (Text)",
+                caption="📄 Your Legal Petition",
             )
 
         await update.message.reply_text(
@@ -442,48 +506,86 @@ async def tracker_callback(update: Update, query, user_id: int, session: dict):
     case_id = None
 
     if query.data == "track_yes":
-        # DB operation — offload
-        case_id = await asyncio.to_thread(create_case, case_data, workflow, court)
-
-        # Show case tracker
-        tracker_text = await asyncio.to_thread(get_case_tracker_text, case_id)
-        await query.edit_message_text(f"✅ Case created!\n\n{tracker_text}")
-
-        # Reminders
-        deadline_dt = datetime.date.today() + datetime.timedelta(days=30)
-        hearing_dt = datetime.date.today() + datetime.timedelta(days=45)
-
         await query.message.reply_text(
-            "🔔 *AUTOMATIC REMINDERS SCHEDULED*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📌 Evidence Submission Deadline: *{deadline_dt.strftime('%d %B %Y')}*\n"
-            f"   → Reminder: 3 days before ({(deadline_dt - datetime.timedelta(days=3)).strftime('%d %B %Y')})\n\n"
-            f"📌 First Hearing: *{hearing_dt.strftime('%d %B %Y')}*\n"
-            f"   → Reminder: 2 days before ({(hearing_dt - datetime.timedelta(days=2)).strftime('%d %B %Y')})\n\n"
-            "_Use /status anytime to check your case reminders._",
-            parse_mode="Markdown",
+            "📅 *Let's set up your case tracker!*\n"
+            "When is the Evidence Submission Deadline?\n"
+            "_(Please reply with a date like '20 Oct' or 'In 2 weeks' or 'Not yet known')_",
+            parse_mode="Markdown"
         )
-
-        # Hearing preparation
-        docs_checklist = "".join(f"  ☐ {d}\n" for d in workflow["documents_needed"])
-        await query.message.reply_text(
-            "📋 *HEARING PREPARATION CHECKLIST*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "*Documents to bring on the hearing day:*\n"
-            "  ☐ Filed complaint / petition copy\n"
-            f"{docs_checklist}"
-            "  ☐ Government ID proof\n"
-            "  ☐ Any correspondence with the respondent\n\n"
-            "*In the courtroom:*\n"
-            "  • Speak clearly and respectfully to the judge\n"
-            "  • Present facts briefly and stick to the point\n"
-            "  • Submit evidence when the judge requests\n"
-            "  • Do not interrupt the opposing party\n"
-            "  • Request an interpreter if needed",
-            parse_mode="Markdown",
-        )
+        update_user_session(user_id, new_state=State.ASK_DEADLINE)
+        return
     else:
         await query.edit_message_text("👍 No problem, case tracking skipped.")
+
+    # Wrap up immediately if they chose NOT to track
+    await finish_session(query.message, session, user_id)
+
+async def ask_deadline_received(update: Update, message: str, user_id: int, session: dict):
+    """User provided evidence deadline, ask for hearing date."""
+    update_user_session(user_id, new_state=State.ASK_HEARING, updates={"evidence_deadline": message})
+
+    await update.message.reply_text(
+        "📅 Got it. And what is your First Hearing Date?\n"
+        "_(e.g., '14 Nov' or 'To be decided')_",
+        parse_mode="Markdown"
+    )
+
+async def ask_hearing_received(update: Update, message: str, user_id: int, session: dict):
+    """User provided hearing date -> Fire create_case and finish flow."""
+    # Add newly collected dates into session case data to pass to tracker
+    evidence_deadline = session["data"]["evidence_deadline"]
+    hearing_date = message
+
+    case_data = session["data"]["case_data"]
+    workflow = session["data"]["workflow"]
+    court = session["data"]["court"]
+
+    # Store user provided dates directly in case_data so tracker.py can use them
+    case_data["user_evidence_deadline"] = evidence_deadline
+    case_data["user_hearing_date"] = hearing_date
+
+    # DB operation — offload
+    case_id = await asyncio.to_thread(create_case, case_data, workflow, court)
+    
+    # Store case ID for final summary
+    update_user_session(user_id, updates={"case_id": case_id})
+
+    # Show case tracker
+    tracker_text = await asyncio.to_thread(get_case_tracker_text, case_id)
+    await update.message.reply_text(f"✅ Case created!\n\n{tracker_text}")
+    
+    # Hearing preparation info
+    docs_checklist = "".join(f"  ☐ {d}\n" for d in workflow["documents_needed"])
+    await update.message.reply_text(
+        "📋 *HEARING PREPARATION CHECKLIST*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "*Documents to bring on the hearing day:*\n"
+        "  ☐ Filed complaint / petition copy\n"
+        f"{docs_checklist}"
+        "  ☐ Government ID proof\n"
+        "  ☐ Any correspondence with the respondent\n\n"
+        "*In the courtroom:*\n"
+        "  • Speak clearly and respectfully to the judge\n"
+        "  • Present facts briefly and stick to the point\n"
+        "  • Submit evidence when the judge requests\n"
+        "  • Do not interrupt the opposing party\n"
+        "  • Request an interpreter if needed",
+        parse_mode="Markdown",
+    )
+    
+    await finish_session(update.message, session, user_id)
+
+async def finish_session(message_obj, session: dict, user_id: int):
+    """Shared summary wrapup since both tracked and non-tracked users need it."""
+    # Fetch fresh session because case_id might have just been appended
+    session = get_user_session(user_id)
+    
+    case_data = session["data"]["case_data"]
+    category = session["data"]["category"]
+    process = session["data"]["process"]
+    court = session["data"]["court"]
+    user_name = session["data"]["user_name"]
+    case_id = session["data"].get("case_id")
 
     # Error prevention check
     missing = []
@@ -495,7 +597,7 @@ async def tracker_callback(update: Update, query, user_id: int, session: dict):
 
     if missing:
         missing_text = "\n".join(f"  ⚠ {m}" for m in missing)
-        await query.message.reply_text(
+        await message_obj.reply_text(
             "⚠️ *COMPLETENESS WARNING*\n\n"
             "The following may need to be added before filing:\n"
             f"{missing_text}\n\n"
@@ -527,11 +629,98 @@ async def tracker_callback(update: Update, query, user_id: int, session: dict):
         "_Send /start to begin a new session._"
     )
 
-    await query.message.reply_text(summary, parse_mode="Markdown")
+    await message_obj.reply_text(summary, parse_mode="Markdown")
     
     # Update state to Done and wipe form data
     update_user_session(user_id, new_state=State.DONE, updates={})
 
+async def help_query_received(update: Update, message: str, user_id: int, session: dict):
+    """User typed their help question. Send to LLM and respond."""
+    return_state = session["data"].get("help_return_state", State.START)
+
+    # If user wants to go back
+    if message.lower() == "back":
+        update_user_session(user_id, new_state=return_state)
+        await _re_prompt_state(update, return_state, session)
+        return
+
+    # Build context for LLM
+    has_field = "questions" in session["data"] and "q_index" in session["data"]
+    category = session["data"].get("category", "Not yet determined")
+    workflow = session["data"].get("workflow", {})
+    workflow_title = workflow.get("title", "Not yet determined")
+
+    if has_field:
+        questions = session["data"]["questions"]
+        q_index = session["data"]["q_index"]
+        if q_index < len(questions):
+            field_key, field_label = questions[q_index]
+        else:
+            field_key, field_label = "general", "General question"
+    else:
+        questions = []
+        q_index = 0
+        field_key = "general"
+        field_label = "General question"
+
+    await update.message.reply_chat_action(action="typing")
+    await update.message.reply_text("Thinking...")
+
+    # Gather previous answers
+    previous_answers = {}
+    if has_field:
+        for key, _ in questions[:q_index]:
+            if key in session["data"].get("case_data", {}):
+                previous_answers[key] = session["data"]["case_data"][key]
+
+    # Call LLM in thread
+    try:
+        help_text = await asyncio.to_thread(
+            get_field_help,
+            dispute_category=category,
+            workflow_title=workflow_title,
+            current_field_key=field_key,
+            current_field_label=field_label,
+            previous_answers=previous_answers,
+            questions=questions,
+            user_query=message,
+        )
+    except Exception as e:
+        print(f"  [LLM ERROR] {type(e).__name__}: {e}")
+        help_text = f"Sorry, an error occurred: {type(e).__name__}"
+
+    await update.message.reply_text(help_text)
+
+    # Return to original state
+    update_user_session(user_id, new_state=return_state)
+    await _re_prompt_state(update, return_state, session)
+
+async def _re_prompt_state(update: Update, state: str, session: dict):
+    """Re-prompt the user based on their current state after returning from help."""
+    if state == State.START:
+        await update.message.reply_text("Please tell me your name to begin:")
+    elif state == State.ASK_PROBLEM:
+        await update.message.reply_text("Please describe your legal problem in your own words:")
+    elif state == State.COLLECT_INFO:
+        questions = session["data"].get("questions", [])
+        q_index = session["data"].get("q_index", 0)
+        if q_index < len(questions):
+            _, label = questions[q_index]
+            await update.message.reply_text(
+                f"Question {q_index + 1}/{len(questions)}:\n"
+                f"{label}\n\n"
+                "Now please type your answer:"
+            )
+        else:
+            await update.message.reply_text("Please continue with the form.")
+    elif state == State.ASK_DOCS:
+        await update.message.reply_text("Please click one of the buttons above to continue.")
+    elif state == State.ASK_DEADLINE:
+        await update.message.reply_text("When is the Evidence Submission Deadline?\n_(Please reply with a date like '20 Oct')_", parse_mode="Markdown")
+    elif state == State.ASK_HEARING:
+        await update.message.reply_text("What is your First Hearing Date?\n_(e.g., '14 Nov')_", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("You can continue where you left off. Type /help for more questions.")
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  MAIN
@@ -556,10 +745,10 @@ def main():
         .build()
     )
 
-    # Add Command Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("help", help_command))
 
     # Add Generalized Async Routers for messages and callbacks
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

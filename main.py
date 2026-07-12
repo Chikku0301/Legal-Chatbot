@@ -13,7 +13,8 @@ import datetime
 from utils.ui import C, bot, user_input, header, step_banner, info, success, warning, thinking
 from core.classifier import classify_dispute, get_workflow
 from core.document_generator import generate_pdf_document, generate_text_document
-from core.tracker import OUTPUT_DIR, create_case, check_reminders, display_case_tracker
+from core.database import OUTPUT_DIR
+from core.tracker import create_case, check_reminders, display_case_tracker
 
 
 def run_bot():

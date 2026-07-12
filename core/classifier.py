@@ -26,8 +26,8 @@ try:
             mapping_data = json.load(f)
             # HF pipelines return labels like "LABEL_0", map them back to category names
             label_mapping = mapping_data.get("id2label", {})
-except ImportError:
-    pass
+except Exception as e:
+    print(f"Warning: Could not load InLegalBERT model ({e}). Falling back to keyword matching.")
 
 def classify_dispute_keywords(message: str) -> tuple[str, str, str]:
     """Fallback: Classify the dispute based on exact keyword matches."""

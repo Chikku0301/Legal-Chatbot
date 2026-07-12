@@ -39,7 +39,7 @@ from core.llm_helper import get_field_help
 load_dotenv(os.path.join(PROJECT_DIR, ".env"))
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
-    print("❌  TELEGRAM_BOT_TOKEN not found in .env file!")
+    print("[ERROR] TELEGRAM_BOT_TOKEN not found in .env file!")
     sys.exit(1)
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
@@ -755,7 +755,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_callback))
 
     # Start polling
-    print("⚖️ Legal Aid Bot running (Multi-User Async Server)!")
+    print("[INFO] Legal Aid Bot running (Multi-User Async Server)!")
     print("   Press Ctrl+C to stop.\n")
     app.run_polling(
         allowed_updates=Update.ALL_TYPES,

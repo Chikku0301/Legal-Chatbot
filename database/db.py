@@ -4,6 +4,9 @@ Database Connection — MySQL connection helper and table initialisation.
 
 import os
 import mysql.connector
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from database.models import ALL_TABLES
 

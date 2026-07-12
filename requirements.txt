@@ -7,3 +7,4 @@ scikit-learn
 tqdm
 groq>=0.4.0
 filelock
+mysql-connector-python

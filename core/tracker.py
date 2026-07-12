@@ -36,18 +36,34 @@ def create_case(case_data: dict, workflow: dict, court: str, deadline_date: str 
         category = workflow.get("title", "Legal Dispute")
         filing_date = datetime.date.today().strftime("%Y-%m-%d")
         
+        # Telegram bot stores them inside case_data, terminal bot might pass them directly
+        raw_hearing = case_data.get("user_hearing_date", hearing_date)
+        raw_submission = case_data.get("user_evidence_deadline", deadline_date)
+        
         try:
-            h_date = datetime.datetime.strptime(hearing_date, "%d %b %Y").strftime("%Y-%m-%d")
+            h_date = datetime.datetime.strptime(raw_hearing, "%d %b %Y").strftime("%Y-%m-%d")
         except:
-            h_date = None
+            # Fallback to standard parsing or None if invalid format
+            try:
+                h_date = datetime.datetime.strptime(raw_hearing, "%d %b").replace(year=datetime.date.today().year).strftime("%Y-%m-%d")
+            except:
+                h_date = None
+
+        try:
+            s_date = datetime.datetime.strptime(raw_submission, "%d %b %Y").strftime("%Y-%m-%d")
+        except:
+            try:
+                s_date = datetime.datetime.strptime(raw_submission, "%d %b").replace(year=datetime.date.today().year).strftime("%Y-%m-%d")
+            except:
+                s_date = None
 
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO cases (case_id, phone_number, category, court, filing_date, hearing_date, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO cases (case_id, phone_number, category, court, filing_date, submission_date, hearing_date, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (case_id, phone, category, court, filing_date, h_date, "Filed")
+            (case_id, phone, category, court, filing_date, s_date, h_date, "Filed")
         )
         conn.commit()
         cur.close()
@@ -101,7 +117,7 @@ def display_case_tracker(case_id: str):
         cur.execute(
             """
             SELECT case_id, phone_number, category, court,
-                   filing_date, hearing_date, pdf_path, status
+                   filing_date, submission_date, hearing_date, pdf_path, status
             FROM cases WHERE case_id = %s
             """,
             (case_id,),
@@ -114,9 +130,10 @@ def display_case_tracker(case_id: str):
             print(f"  {'Case ID':<22}: {C.BOLD}{row[0]}{C.RESET}")
             print(f"  {'Case Type':<22}: {row[2]}")
             print(f"  {'Court':<22}: {row[3]}")
-            print(f"  {'Status':<22}: {C.GREEN}{row[7]}{C.RESET}")
+            print(f"  {'Status':<22}: {C.GREEN}{row[8]}{C.RESET}")
             print(f"  {'Filing Date':<22}: {row[4]}")
-            print(f"  {'Hearing Date':<22}: {C.YELLOW}{row[5]}{C.RESET}")
+            print(f"  {'Submission Date':<22}: {C.CYAN}{row[5]}{C.RESET}")
+            print(f"  {'Hearing Date':<22}: {C.YELLOW}{row[6]}{C.RESET}")
             print()
             return
     finally:
@@ -132,7 +149,7 @@ def get_case_tracker_text(case_id: str) -> str:
         cur.execute(
             """
             SELECT case_id, phone_number, category, court,
-                   filing_date, hearing_date, pdf_path, status
+                   filing_date, submission_date, hearing_date, pdf_path, status
             FROM cases WHERE case_id = %s
             """,
             (case_id,),
@@ -147,9 +164,10 @@ def get_case_tracker_text(case_id: str) -> str:
                 f"📌 Case ID:       {row[0]}\n"
                 f"📂 Case Type:     {row[2]}\n"
                 f"🏛 Court:         {row[3]}\n"
-                f"✅ Status:        {row[7]}\n"
+                f"✅ Status:        {row[8]}\n"
                 f"📅 Filing Date:   {row[4]}\n"
-                f"📆 Hearing Date:  {row[5]}"
+                f"⏳ Submission By: {row[5]}\n"
+                f"📆 Hearing Date:  {row[6]}"
             )
     finally:
         conn.close()

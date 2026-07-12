@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS cases (
     category     VARCHAR(200),
     court        VARCHAR(200),
     filing_date  DATE,
+    submission_date DATE,
     hearing_date DATE,
     pdf_path     TEXT,
     status       VARCHAR(50) DEFAULT 'Filed'

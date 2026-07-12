@@ -1,31 +1,20 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-.env
-
 
 # Virtual Environment
 venv/
 .venv/
-env/
-ENV/
 
+# Environment Variables
 .env
 
-# Project Directories & Data
+# Project Artifacts
 models/
 outputs/
 data/synthetic_dataset.json
 
-# Temporary scripts and logs
-test_import.py
-test_import2.py
-error.log
-error_transformers.txt
-
 # Editor / IDE
 .vscode/
 .idea/
-*.swp
 .DS_Store

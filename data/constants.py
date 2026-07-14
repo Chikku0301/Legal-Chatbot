@@ -1,5 +1,6 @@
 """
 Data Constants — Dispute keywords and workflow definitions.
+This is a synthetic dataset
 """
 
 DISPUTE_KEYWORDS = {
